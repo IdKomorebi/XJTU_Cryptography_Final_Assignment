@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>实时聊天室</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div class="logo">💬 Flask 实时聊天室</div>
+      <div class="user-info">
+        <span id="current-username"></span>
+      </div>
+    </header>
+
+    <main class="app-main">
+      <aside class="sidebar left-panel">
+        <div class="sidebar-header">
+          <h2>加密设置</h2>
+        </div>
+        <div class="encrypt-panel">
+          <div class="encrypt-toggle-row">
+            <span class="toggle-label">图片加密</span>
+            <label class="switch">
+              <input id="encrypt-toggle" type="checkbox" />
+              <span class="slider round"></span>
+            </label>
+          </div>
+          <div class="key-card">
+            <div class="key-card-header">
+              <span class="key-card-label">当前密钥</span>
+              <button id="refresh-key" class="btn btn-small">刷新</button>
+            </div>
+            <div class="key-card-value" id="current-key"></div>
+            <div class="key-card-tip">
+              首次使用新密钥加密时，需要初始化图片映射，请耐心等待一次。
+            </div>
+          </div>
+        </div>
+        <div class="sidebar-header users-header">
+          <h2>在线用户</h2>
+        </div>
+        <ul id="user-list" class="user-list"></ul>
+      </aside>
+
+      <section class="chat-section">
+        <div id="system-banner" class="system-banner hidden">
+          <span id="system-banner-text"></span>
+        </div>
+
+        <div id="messages" class="messages" data-dropzone>
+          <div class="messages-placeholder">请输入用户名加入聊天室开始聊天～</div>
+        </div>
+
+        <form id="message-form" class="message-form">
+          <div class="input-row">
+            <input
+              id="message-input"
+              type="text"
+              placeholder="输入消息，按 Enter 发送"
+              autocomplete="off"
+            />
+            <button type="submit" class="btn btn-primary">发送</button>
+          </div>
+          <div class="toolbar-row">
+            <label class="file-btn">
+              <input id="image-input" type="file" accept="image/*" hidden />
+              📷 发送图片
+            </label>
+            <span class="hint-text">也可以把图片拖拽到聊天区域上传</span>
+          </div>
+        </form>
+      </section>
+
+      <aside class="sidebar right-panel">
+        <div class="sidebar-header">
+          <h2>解密工具</h2>
+        </div>
+        <div class="decrypt-panel">
+          <div class="key-card decrypt-key-card">
+            <div class="key-card-header">
+              <span class="key-card-label">解密密钥</span>
+            </div>
+            <input
+              id="decrypt-key-input"
+              type="text"
+              class="decrypt-key-input"
+              placeholder="请输入与发送方一致的密钥"
+            />
+          </div>
+
+          <div id="decrypt-dropzone" class="decrypt-dropzone">
+            <p>将收到的加密图片按顺序拖入此区域，或点击选择文件</p>
+            <input
+              id="decrypt-files-input"
+              type="file"
+              accept="image/*"
+              multiple
+              hidden
+            />
+            <button id="select-decrypt-files" class="btn btn-small">
+              选择图片文件
+            </button>
+            <div id="decrypt-files-info" class="decrypt-files-info"></div>
+          </div>
+
+          <button id="decrypt-btn" class="btn btn-primary decrypt-btn">
+            解密
+          </button>
+
+          <div class="key-label">解密结果</div>
+          <textarea
+            id="decrypt-output"
+            class="decrypt-output"
+            rows="6"
+            readonly
+          ></textarea>
+        </div>
+      </aside>
+    </main>
+
+    <div id="username-modal" class="modal-backdrop">
+      <div class="modal">
+        <h2>欢迎来到聊天室</h2>
+        <p>请输入你的昵称：</p>
+        <input
+          id="username-input"
+          type="text"
+          placeholder="例如：小明"
+          maxlength="20"
+        />
+        <button id="join-btn" class="btn btn-primary modal-btn">加入聊天</button>
+      </div>
+    </div>
+
+    <div id="encrypt-wait-modal" class="modal-backdrop hidden">
+      <div class="modal small-modal">
+        <h2>正在初始化图片映射</h2>
+        <p>首次使用该密钥时，需要为每个字符准备对应的图片，请稍等几秒钟～</p>
+        <div class="spinner-row">
+          <div class="spinner"></div>
+          <span>处理中...</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/chat.js"></script>
+</body>
+</html>
+
