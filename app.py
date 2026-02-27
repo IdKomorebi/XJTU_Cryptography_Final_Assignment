@@ -277,15 +277,15 @@ def api_assign_key():
             if p.is_dir():
                 existing_keys.append(p.name)
 
-    # 当前在线用户已经占用的密钥
-    cutoff = now_ms() - 15_000
-    used_keys = {
+    # 当前在线用户已经占用的密钥（仅考虑最近一段时间内活跃的）
+    cutoff = now_ms() - 25_000
+    used_keys_online = {
         uinfo.get("key")
         for uinfo in online_users.values()
         if uinfo.get("last_seen", cutoff) >= cutoff and uinfo.get("key")
     }
 
-    candidates = [k for k in existing_keys if k not in used_keys]
+    candidates = [k for k in existing_keys if k not in used_keys_online]
 
     if candidates:
         chosen = random.choice(candidates)
@@ -293,8 +293,18 @@ def api_assign_key():
         online_users[user_id] = info
         return jsonify({"ok": True, "key": chosen, "existing": True})
 
-    # 没有可用旧密钥，则生成新的随机密钥
-    new_key = generate_random_key()
+    # 没有可用旧密钥，则生成新的随机密钥，显式避免与当前所有已用密钥/目录重复
+    all_used_keys = {
+        uinfo.get("key")
+        for uinfo in online_users.values()
+        if uinfo.get("key")
+    }
+
+    while True:
+        new_key = generate_random_key()
+        if new_key not in all_used_keys and new_key not in existing_keys:
+            break
+
     info["key"] = new_key
     online_users[user_id] = info
     return jsonify({"ok": True, "key": new_key, "existing": False})
