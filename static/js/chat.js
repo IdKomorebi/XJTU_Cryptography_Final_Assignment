@@ -26,6 +26,7 @@
   const decryptFilesInfo = qs("#decrypt-files-info");
   const decryptBtn = qs("#decrypt-btn");
   const decryptOutput = qs("#decrypt-output");
+  const decryptResetBtn = qs("#decrypt-reset-btn");
   const encryptWaitModal = qs("#encrypt-wait-modal");
 
   let selfUserId = null;
@@ -385,6 +386,19 @@
     });
   }
 
+  if (decryptResetBtn) {
+    decryptResetBtn.addEventListener("click", () => {
+      decryptFiles.length = 0;
+      if (decryptFilesInput) {
+        decryptFilesInput.value = "";
+      }
+      updateDecryptFilesInfo();
+      if (decryptOutput) {
+        decryptOutput.value = "";
+      }
+    });
+  }
+
   async function sendTextMessage(text) {
     try {
       const resp = await fetch("/api/send_message", {
@@ -477,6 +491,13 @@
     pollTimer = setInterval(pollMessages, 1000);
   }
 
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
   function startHeartbeat() {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     sendHeartbeat();
@@ -491,6 +512,8 @@
       return;
     }
     try {
+      // 发送加密图片时暂时停止轮询，避免本地视图在请求过程中出现重复/乱序
+      stopPolling();
       if (encryptWaitModal) {
         encryptWaitModal.classList.remove("hidden");
       }
@@ -517,12 +540,16 @@
       for (const url of images) {
         await sendImageMessage(url);
       }
+      // 发送完成后手动拉一次最新消息，再恢复轮询
+      await pollMessages();
+      startPolling();
     } catch (e) {
       console.error("encrypt error", e);
       showSystemBanner("加密失败");
       if (encryptWaitModal) {
         encryptWaitModal.classList.add("hidden");
       }
+      startPolling();
     }
   }
 
