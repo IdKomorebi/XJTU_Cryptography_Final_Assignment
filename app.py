@@ -2,7 +2,7 @@ import os
 import uuid
 import time
 import json
-import shutil
+import csv
 import hashlib
 import random
 from datetime import datetime, timezone
@@ -17,6 +17,7 @@ UPLOAD_FOLDER = os.path.join(BASE_DIR, "static", "uploads")
 KEYS_BASE_DIR = os.path.join(BASE_DIR, "static", "keys")
 RAW_IMG_DIR = os.path.join(BASE_DIR, "RawImg")
 TEMP_DECRYPT_DIR = os.path.join(BASE_DIR, "tmp_decrypt")
+BINARY_MAPPING_CSV = os.path.join(BASE_DIR, "image_binary_mapping.csv")
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(KEYS_BASE_DIR, exist_ok=True)
@@ -30,12 +31,15 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = "dev-secret-key"
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
-# 聊天历史（内存）
+# Chat history stored in memory.
 messages = []
 MAX_HISTORY = 200
 
-# 在线用户：user_id -> {"username": ..., "last_seen": timestamp}
+# Online users: user_id -> {"username": ..., "last_seen": timestamp}
 online_users = {}
+
+# Cache for image_binary_mapping.csv: image_name -> binary_code
+_binary_cache = None
 
 
 def now_ms():
@@ -43,9 +47,7 @@ def now_ms():
 
 
 def make_message(user_id, username, msg_type, content):
-    """
-    构造消息对象
-    """
+    """Build a message payload."""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return {
         "id": str(uuid.uuid4()),
@@ -65,8 +67,8 @@ def prune_history():
 
 
 def get_online_users():
-    # 心跳间隔约 7-8 秒，这里给一个稍微宽松的阈值
-    cutoff = now_ms() - 25_000  # 25 秒没心跳就认为离线
+    # Heartbeat interval is around 7-8s, so use a relaxed offline threshold.
+    cutoff = now_ms() - 25_000
     return [
         {"userId": uid, "username": info["username"]}
         for uid, info in online_users.items()
@@ -82,7 +84,6 @@ def char_to_index(ch: str) -> int:
     ch = ch.upper()
     if ch in ALPHABET:
         return ALPHABET.index(ch)
-    # 其他字符统一映射为空格
     return ALPHABET.index(" ")
 
 
@@ -91,7 +92,6 @@ def index_to_char(idx: int) -> str:
 
 
 def safe_key_name(key: str) -> str:
-    # 简单处理目录名安全问题
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in key) or "default"
 
 
@@ -102,13 +102,75 @@ def compute_char_index(binary_code: str, key: str) -> int:
     return value % ALPHABET_SIZE
 
 
+def _dedupe_keep_order(items):
+    seen = set()
+    out = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _normalize_mapping(mapping):
+    normalized = {}
+    for i in range(ALPHABET_SIZE):
+        key = str(i)
+        normalized[key] = _dedupe_keep_order(mapping.get(key) or [])
+    return normalized
+
+
+def load_binary_cache():
+    global _binary_cache
+    if _binary_cache is not None:
+        return _binary_cache
+
+    cache = {}
+    csv_path = Path(BINARY_MAPPING_CSV)
+    if csv_path.exists():
+        with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                image_name = (row.get("image_name") or "").strip()
+                binary_code = (row.get("binary_code") or "").strip()
+                if image_name and binary_code and image_name not in cache:
+                    cache[image_name] = binary_code
+
+    _binary_cache = cache
+    return _binary_cache
+
+
+def get_raw_image_files():
+    raw_path = Path(RAW_IMG_DIR)
+    if not raw_path.exists():
+        raise RuntimeError(f"Raw image directory does not exist: {RAW_IMG_DIR}")
+
+    allowed = {".jpg", ".jpeg", ".png", ".bmp"}
+    files = []
+    seen = set()
+    for p in raw_path.iterdir():
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in allowed:
+            continue
+        norm = str(p.resolve()).lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        files.append(p)
+
+    files.sort(key=lambda x: x.name)
+    return files
+
+
 def initialize_key_mapping(key: str):
     """
-    第一次使用某个密钥时：
-    - 遍历 RawImg 下所有图片
-    - 计算 32 位编码，再结合密钥做哈希 %29 得到字符下标
-    - 在 static/keys/<key_name>/<0-28>/ 里复制图片
-    - 在 mapping.json 中保存索引到文件列表的映射
+    First time a key is used:
+    - Traverse RawImg files
+    - Reuse cached binary fingerprints when possible
+    - Compute char-group index from key + fingerprint
+    - Save index -> filenames mapping into mapping.json
     """
     key_name = safe_key_name(key)
     key_dir = os.path.join(KEYS_BASE_DIR, key_name)
@@ -116,38 +178,33 @@ def initialize_key_mapping(key: str):
 
     if os.path.exists(mapping_file):
         with open(mapping_file, "r", encoding="utf-8") as f:
-            return json.load(f), False
+            mapping = json.load(f)
+        normalized = _normalize_mapping(mapping)
+        if normalized != mapping:
+            with open(mapping_file, "w", encoding="utf-8") as wf:
+                json.dump(normalized, wf, ensure_ascii=False)
+        return normalized, False
 
     os.makedirs(key_dir, exist_ok=True)
     groups = {str(i): [] for i in range(ALPHABET_SIZE)}
-
-    raw_path = Path(RAW_IMG_DIR)
-    if not raw_path.exists():
-        raise RuntimeError(f"原始图片目录不存在: {RAW_IMG_DIR}")
-
-    exts = [".jpg", ".jpeg", ".png", ".bmp"]
-    image_files = []
-    for ext in exts:
-        image_files.extend(raw_path.glob(f"*{ext}"))
-        image_files.extend(raw_path.glob(f"*{ext.upper()}"))
-
-    image_files = sorted(image_files, key=lambda x: x.name)
+    groups_seen = {str(i): set() for i in range(ALPHABET_SIZE)}
+    image_files = get_raw_image_files()
+    binary_cache = load_binary_cache()
 
     for img_path in image_files:
-        binary_string, _, _ = image_to_binary(str(img_path))
+        binary_string = binary_cache.get(img_path.name)
+        if not binary_string:
+            binary_string, _, _ = image_to_binary(str(img_path))
         if not binary_string:
             continue
+
         idx = compute_char_index(binary_string, key)
         idx_str = str(idx)
-
-        target_dir = os.path.join(key_dir, idx_str)
-        os.makedirs(target_dir, exist_ok=True)
         target_name = img_path.name
-        target_path = os.path.join(target_dir, target_name)
 
-        if not os.path.exists(target_path):
-            shutil.copy2(str(img_path), target_path)
-
+        if target_name in groups_seen[idx_str]:
+            continue
+        groups_seen[idx_str].add(target_name)
         groups[idx_str].append(target_name)
 
     with open(mapping_file, "w", encoding="utf-8") as f:
@@ -163,10 +220,7 @@ def index():
 
 @app.route("/upload", methods=["POST"])
 def upload_image():
-    """
-    HTTP 图片上传接口
-    前端通过 FormData POST 文件，返回图片 URL
-    """
+    """HTTP image upload endpoint."""
     if "image" not in request.files:
         return jsonify({"success": False, "error": "No image file provided"}), 400
 
@@ -191,11 +245,16 @@ def uploaded_file(filename):
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
 
+@app.route("/raw_images/<path:filename>")
+def raw_image_file(filename):
+    return send_from_directory(RAW_IMG_DIR, filename)
+
+
 @app.route("/api/heartbeat", methods=["POST"])
 def heartbeat():
     data = request.get_json(force=True) or {}
     user_id = data.get("userId")
-    username = (data.get("username") or "匿名用户").strip() or "匿名用户"
+    username = (data.get("username") or "Anonymous").strip() or "Anonymous"
     if not user_id:
         return jsonify({"ok": False, "error": "missing userId"}), 400
     online_users[user_id] = {"username": username, "last_seen": now_ms()}
@@ -206,7 +265,7 @@ def heartbeat():
 def api_send_message():
     data = request.get_json(force=True) or {}
     user_id = data.get("userId")
-    username = (data.get("username") or "匿名用户").strip() or "匿名用户"
+    username = (data.get("username") or "Anonymous").strip() or "Anonymous"
     content = (data.get("content") or "").strip()
     if not user_id or not content:
         return jsonify({"ok": False, "error": "bad payload"}), 400
@@ -221,7 +280,7 @@ def api_send_message():
 def api_send_image():
     data = request.get_json(force=True) or {}
     user_id = data.get("userId")
-    username = (data.get("username") or "匿名用户").strip() or "匿名用户"
+    username = (data.get("username") or "Anonymous").strip() or "Anonymous"
     url = (data.get("url") or "").strip()
     if not user_id or not url:
         return jsonify({"ok": False, "error": "bad payload"}), 400
@@ -234,10 +293,7 @@ def api_send_image():
 
 @app.route("/api/messages")
 def api_messages():
-    """
-    轮询获取新消息:
-    /api/messages?since=timestamp_ms
-    """
+    """Poll new messages: /api/messages?since=timestamp_ms"""
     try:
         since = int(request.args.get("since", "0"))
     except ValueError:
@@ -250,26 +306,23 @@ def api_messages():
 @app.route("/api/assign_key", methods=["POST"])
 def api_assign_key():
     """
-    为新登录用户分配密钥：
-    - 优先从已有密钥中随机分配，保证当前在线用户之间不重复
-    - 如果不够分，则生成新的随机密钥
+    Assign a key to a newly joined user:
+    - Reuse existing key directories when possible
+    - Avoid collisions among currently active users
     """
     data = request.get_json(force=True) or {}
     user_id = data.get("userId")
-    username = (data.get("username") or "匿名用户").strip() or "匿名用户"
+    username = (data.get("username") or "Anonymous").strip() or "Anonymous"
     if not user_id:
         return jsonify({"ok": False, "error": "missing userId"}), 400
 
-    # 更新/记录在线用户（此处不设置 last_seen，只记录用户名和密钥）
     info = online_users.get(user_id, {})
     info["username"] = username
     online_users[user_id] = info
 
-    # 如果该用户之前已经有密钥，就直接返回
     if info.get("key"):
         return jsonify({"ok": True, "key": info["key"], "existing": True})
 
-    # 已存在的密钥目录（历史上用过的）
     existing_keys = []
     base = Path(KEYS_BASE_DIR)
     if base.exists():
@@ -277,7 +330,6 @@ def api_assign_key():
             if p.is_dir():
                 existing_keys.append(p.name)
 
-    # 当前在线用户已经占用的密钥（仅考虑最近一段时间内活跃的）
     cutoff = now_ms() - 25_000
     used_keys_online = {
         uinfo.get("key")
@@ -293,7 +345,6 @@ def api_assign_key():
         online_users[user_id] = info
         return jsonify({"ok": True, "key": chosen, "existing": True})
 
-    # 没有可用旧密钥，则生成新的随机密钥，显式避免与当前所有已用密钥/目录重复
     all_used_keys = {
         uinfo.get("key")
         for uinfo in online_users.values()
@@ -312,14 +363,12 @@ def api_assign_key():
 
 @app.route("/api/encrypt_text", methods=["POST"])
 def api_encrypt_text():
-    """
-    文本 -> 图片 URL 列表（根据密钥和 RawImg 映射）
-    """
+    """Convert text to encrypted image URL list by key mapping."""
     data = request.get_json(force=True) or {}
     key = (data.get("key") or "").strip()
     text = (data.get("text") or "").strip()
     if not key or not text:
-        return jsonify({"ok": False, "error": "缺少密钥或文本"}), 400
+        return jsonify({"ok": False, "error": "missing key or text"}), 400
 
     try:
         mapping, initialized_now = initialize_key_mapping(key)
@@ -327,9 +376,13 @@ def api_encrypt_text():
         return jsonify({"ok": False, "error": str(e)}), 500
 
     key_name = safe_key_name(key)
+    key_dir = os.path.join(KEYS_BASE_DIR, key_name)
+    use_legacy_key_storage = any(
+        os.path.isdir(os.path.join(key_dir, str(i))) for i in range(ALPHABET_SIZE)
+    )
     urls = []
 
-    # 为了一个消息内部尽量不用同一字符的同一图片，这里为每个字符下标维护一个已使用列表
+    # Reduce duplicates for the same character within one outgoing message.
     used_per_index = {str(i): set() for i in range(ALPHABET_SIZE)}
 
     for ch in text:
@@ -342,7 +395,6 @@ def api_encrypt_text():
         candidates = list(files)
         used = used_per_index[idx_str]
 
-        # 优先从“未使用”集合里随机选，如果都用过了就允许重复
         unused = [f for f in candidates if f not in used]
         if unused:
             file_name = random.choice(unused)
@@ -351,7 +403,10 @@ def api_encrypt_text():
 
         used.add(file_name)
 
-        url = f"/static/keys/{key_name}/{idx_str}/{file_name}"
+        if use_legacy_key_storage:
+            url = f"/static/keys/{key_name}/{idx_str}/{file_name}"
+        else:
+            url = f"/raw_images/{file_name}"
         urls.append(url)
 
     return jsonify({"ok": True, "images": urls, "initializedNow": initialized_now})
@@ -359,16 +414,14 @@ def api_encrypt_text():
 
 @app.route("/api/decrypt_images", methods=["POST"])
 def api_decrypt_images():
-    """
-    上传图片 + 密钥 -> 解密出文本（按上传顺序）
-    """
+    """Decrypt uploaded images into text in upload order."""
     key = (request.form.get("key") or "").strip()
     if not key:
-        return jsonify({"ok": False, "error": "缺少密钥"}), 400
+        return jsonify({"ok": False, "error": "missing key"}), 400
 
     files = request.files.getlist("images")
     if not files:
-        return jsonify({"ok": False, "error": "没有接收到图片"}), 400
+        return jsonify({"ok": False, "error": "no images received"}), 400
 
     chars = []
     temp_paths = []
@@ -400,9 +453,7 @@ def api_decrypt_images():
 
 @app.route("/api/logout", methods=["POST"])
 def api_logout():
-    """
-    页面关闭前通过 sendBeacon / fetch 告知服务器该用户下线
-    """
+    """Mark user offline before page close (sendBeacon/fetch)."""
     data = request.get_json(force=True, silent=True) or {}
     user_id = data.get("userId")
     if user_id and user_id in online_users:
@@ -412,4 +463,3 @@ def api_logout():
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5001, debug=True)
-
