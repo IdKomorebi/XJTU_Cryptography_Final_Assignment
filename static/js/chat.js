@@ -33,8 +33,10 @@
   let username = null;
   let lastTs = 0;
   let pollTimer = null;
+  let pollInFlight = false;
   let heartbeatTimer = null;
   let currentKey = null;
+  const renderedMessageIds = new Set();
   const decryptFiles = [];
 
   function showSystemBanner(text) {
@@ -442,16 +444,25 @@
   }
 
   async function pollMessages() {
+    if (pollInFlight) return;
+    pollInFlight = true;
     try {
       const resp = await fetch(`/api/messages?since=${lastTs}`);
       const data = await resp.json();
       if (!data.ok) return;
       if (Array.isArray(data.messages) && data.messages.length > 0) {
         data.messages.forEach((msg) => {
+          if (msg && msg.id && renderedMessageIds.has(msg.id)) {
+            lastTs = Math.max(lastTs, msg.tsMs || 0);
+            return;
+          }
           if (msg.type === "system") {
             renderSystemMessage(msg.content, msg.timestamp);
           } else {
             renderMessage(msg);
+          }
+          if (msg && msg.id) {
+            renderedMessageIds.add(msg.id);
           }
           lastTs = Math.max(lastTs, msg.tsMs || 0);
         });
@@ -462,6 +473,8 @@
       }
     } catch (e) {
       console.error("poll error", e);
+    } finally {
+      pollInFlight = false;
     }
   }
 
